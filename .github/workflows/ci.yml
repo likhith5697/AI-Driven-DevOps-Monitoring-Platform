@@ -1,0 +1,31 @@
+name: AI Observability CI
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Node Service
+        run: docker build ./order-service -t node-service
+
+      - name: Build Python Agent
+        run: docker build ./python-agent -t python-agent
+
+      - name: Start Stack
+        run: docker compose -f order-service/docker-compose.yml up -d
+
+      - name: Wait for Node API
+        run: sleep 20
+
+      - name: Health Check Node API
+        run: curl -f http://localhost:3000/orders
