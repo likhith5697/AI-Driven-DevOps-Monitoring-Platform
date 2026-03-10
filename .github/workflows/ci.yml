@@ -27,8 +27,14 @@ jobs:
       - name: Wait for Node API
         run: sleep 20
 
-      - name: Health Check Node API
-        run: curl -f http://localhost:3000/orders
+      - name: Test POST /api/orders
+        run: |
+          curl -X POST http://localhost:3000/api/orders \
+          -H "Content-Type: application/json" \
+          -d '{"item":"iphone","price":1800}'
+
+      - name: Test GET /api/orders
+        run: curl -f http://localhost:3000/api/orders
 
   deploy:
     needs: build-and-test
