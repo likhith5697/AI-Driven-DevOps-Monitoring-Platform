@@ -74,6 +74,11 @@ jobs:
             docker-compose -f order-service/docker-compose.yml down
             docker-compose -f order-service/docker-compose.yml up -d --build
 
+            cd /home/ubuntu/AI-Driven-DevOps-Monitoring-Platform/python-agent
+
+            # Build the Python agent image locally on EC2
+            docker build -t python-agent .
+
             # Start Python agent separately with secret injected
             docker stop python-agent || true
             docker rm python-agent || true
