@@ -57,5 +57,5 @@ jobs:
             cd AI-Driven-DevOps-Monitoring-Platform
             git pull origin main
 
-            docker compose --file order-service/docker-compose.yml down
-            docker compose --file order-service/docker-compose.yml up -d --build
+            docker-compose -f order-service/docker-compose.yml down
+            docker-compose -f order-service/docker-compose.yml up -d --build
