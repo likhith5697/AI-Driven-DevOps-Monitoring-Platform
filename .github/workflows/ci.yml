@@ -37,25 +37,25 @@ jobs:
         run: curl -f http://localhost:3000/api/orders
 
   deploy:
-    needs: build-and-test
-    runs-on: ubuntu-latest
+  needs: build-and-test
+  runs-on: ubuntu-latest
 
-    steps:
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd /home/ubuntu
+  steps:
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ubuntu
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          cd /home/ubuntu
 
-            if [ ! -d "AI-Driven-DevOps-Monitoring-Platform" ]; then
-              git clone https://github.com/likhith5697/AI-Driven-DevOps-Monitoring-Platform.git
-            fi
+          if [ ! -d "AI-Driven-DevOps-Monitoring-Platform" ]; then
+            git clone https://github.com/likhith5697/AI-Driven-DevOps-Monitoring-Platform.git
+          fi
 
-            cd AI-Driven-DevOps-Monitoring-Platform
-            git pull origin main
+          cd AI-Driven-DevOps-Monitoring-Platform
+          git pull origin main
 
-            docker compose -f order-service/docker-compose.yml down
-            docker compose -f order-service/docker-compose.yml up -d --build
+          docker compose --file order-service/docker-compose.yml down
+          docker compose --file order-service/docker-compose.yml up -d --build
