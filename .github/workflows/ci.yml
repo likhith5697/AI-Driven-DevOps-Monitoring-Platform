@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
 
-
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -16,18 +15,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Build Node service
       - name: Build Node Service
         run: docker build ./order-service -t node-service
 
+      # Build Python agent
       - name: Build Python Agent
         run: docker build ./python-agent -t python-agent
 
+      # Start Node stack (Node + Prometheus via docker-compose)
       - name: Start Stack
-        run: docker compose --file order-service/docker-compose.yml up -d
+        run: docker compose --file order-service/docker-compose.yml up -d --build
 
+      # Wait for Node API to start
       - name: Wait for Node API
         run: sleep 20
 
+      # Test Node API endpoints
       - name: Test POST /api/orders
         run: |
           curl -X POST http://localhost:3000/api/orders \
@@ -36,6 +40,9 @@ jobs:
 
       - name: Test GET /api/orders
         run: curl -f http://localhost:3000/api/orders
+
+      - name: Test /metrics endpoint
+        run: curl -f http://localhost:3000/metrics
 
   deploy:
     needs: build-and-test
@@ -49,8 +56,10 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # Go to home
             cd /home/ubuntu
 
+            # Clone repo if missing
             if [ ! -d "AI-Driven-DevOps-Monitoring-Platform" ]; then
               git clone https://github.com/likhith5697/AI-Driven-DevOps-Monitoring-Platform.git
             fi
@@ -58,5 +67,17 @@ jobs:
             cd AI-Driven-DevOps-Monitoring-Platform
             git pull origin main
 
+            # Clean old Docker resources to prevent space issues
+            docker system prune -af --volumes
+
+            # Start Node stack via Docker Compose
             docker-compose -f order-service/docker-compose.yml down
             docker-compose -f order-service/docker-compose.yml up -d --build
+
+            # Start Python agent separately with secret injected
+            docker stop python-agent || true
+            docker rm python-agent || true
+            docker run -d --name python-agent \
+              -e OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
+              -p 5000:5000 \
+              python-agent
