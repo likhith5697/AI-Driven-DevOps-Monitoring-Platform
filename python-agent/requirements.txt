@@ -2,3 +2,10 @@ python-dotenv
 openai
 prometheus-client
 opensearch-py
+schedule
+fastapi
+uvicorn
+
+# LangChain & Vector DB
+langchain
+chromadb

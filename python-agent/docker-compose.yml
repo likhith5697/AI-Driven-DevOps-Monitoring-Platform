@@ -1,0 +1,12 @@
+
+services:
+  rag-agent:
+    build: .
+    container_name: rag-agent
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./vector_store:/app/vector_store  # persist Chroma vector store
+      - ./logs:/app/logs                  # optional: persist logs
