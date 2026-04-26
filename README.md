@@ -1,78 +1,84 @@
-# AI-Driven DevOps Monitoring Platform
+# 🤖 AI-Driven DevOps Observability Platform (GenAI SRE Agent)
 
-## Overview
+## 🚀 Overview
 
-This project demonstrates an **advanced observability and SRE platform** powered by Generative AI. It integrates:
+This project implements a **production-style AI-powered observability and SRE platform** that combines:
 
-- Microservices monitoring  
-- Metrics collection and visualization  
-- Log aggregation and intelligent summarization using a GenAI agent  
+- Microservices (Order, Payment, Inventory)
+- Metrics (Prometheus)
+- Logs (OpenSearch)
+- AI Orchestration Layer (LLM + MCP Tooling)
 
-It showcases how to combine **Node.js microservices**, **Prometheus metrics**, **OpenSearch logs**, and a **Python-based LLM agent** (GPT-4.1 nano) for actionable insights.
-
----
-
-## Architecture
-
-The platform consists of three core layers:
-
-1. **Application Layer**  
-   - Node.js microservices exposing APIs and producing metrics.  
-   - Optional stateful components like databases (MongoDB, PostgreSQL) can be integrated.
-
-2. **Observability Layer**  
-   - Prometheus for collecting metrics from services.  
-   - OpenSearch for log aggregation and query.  
-   - Dashboards (OpenSearch Dashboards / Grafana) for visual insights.
-
-3. **Intelligence Layer**  
-   - Python GenAI agent consumes metrics and logs.  
-   - Generates natural language summaries, insights, and alerts.  
-   - Supports querying recent logs and service health with structured responses.  
+👉 The system enables **natural language debugging of distributed systems** using an intelligent multi-step AI agent.
 
 ---
 
-## Key Features
+## 🧠 What Makes This Advanced
 
-- Real-time **HTTP and service metrics** tracking.  
-- Aggregated **log analysis** over configurable time windows.  
-- **LLM-driven observability** for automated reasoning and suggestions.  
-- CI/CD deployment pipeline for automated build and production rollout.  
-- Secure secrets management via CI/CD without storing sensitive data on the host.  
+Unlike basic GenAI apps, this platform includes:
 
----
-
-## DevOps & SRE Principles
-
-- **Infrastructure as Code**: Services defined via Docker Compose.  
-- **Continuous Integration & Deployment**: Automated testing and deployment with GitHub Actions.  
-- **Secrets Management**: API keys and credentials injected dynamically, avoiding hard-coded secrets.  
-- **Scalability & Observability**: Modular architecture allows scaling individual services and monitoring them seamlessly.  
-- **Reproducibility**: Containers ensure consistent environment across dev, test, and production.  
+- ✅ **Multi-step AI reasoning (not single prompt)**
+- ✅ **Tool-based architecture (MCP server)**
+- ✅ **Cross-service log correlation (order → inventory → payment)**
+- ✅ **Metrics + Logs combined reasoning**
+- ✅ **Production-style SRE debugging flows**
 
 ---
 
-## Use Cases
+## 🏗️ Architecture
 
-- **Service health monitoring** in production environments.  
-- **Automatic log summarization** for faster incident triage.  
-- **Cost and performance insights** via metrics and LLM reasoning.  
-- **SRE playbooks** enhanced by AI-generated recommendations.  
+### 1. Application Layer (Microservices)
 
----
+| Service | Port | Responsibility |
+|--------|------|---------------|
+| order-service | 3000 | Orchestrates order flow |
+| payment-service | 3001 | Handles payment processing |
+| inventory-service | 3002 | Manages stock |
 
-## Takeaways
-
-This project illustrates how to combine **modern DevOps practices** with **Generative AI**:
-
-- Containerized microservices for consistency.  
-- Observability stack for metrics and logs.  
-- LLM-powered insights for intelligent SRE.  
-- CI/CD automation for rapid deployment and testing.  
-
-It is designed to be a **learning platform for advanced GenAI DevOps workflows** while being production-capable for small-scale deployments.
+Each service:
+- Emits structured logs → OpenSearch
+- Exposes Prometheus metrics
 
 ---
 
-**Author:** Likhith  
-**Focus:** GenAI Observability, DevOps, SRE Automation
+### 2. Observability Layer
+
+| Component | Purpose |
+|----------|--------|
+| Prometheus | Metrics scraping & aggregation |
+| OpenSearch | Centralized logging |
+| Dashboards (optional) | Visualization |
+
+---
+
+### 3. Intelligence Layer (GenAI SRE Agent)
+
+#### 🔹 Health Agent (FastAPI)
+- Endpoint: `http://localhost:5000/ask`
+- Accepts natural language queries
+- Orchestrates reasoning
+
+#### 🔹 MCP Server (Tool Layer)
+- Endpoint: `http://localhost:5001`
+- Executes tools like:
+  - `get_service_health`
+  - `get_http_metrics`
+  - `search_logs`
+  - `get_metrics_summary`
+
+---
+
+## 🔁 AI Agent Flow (CORE DESIGN)
+
+```text
+User Question
+   ↓
+LLM (Intent Detection)
+   ↓
+Agent Plan (multi-step)
+   ↓
+MCP Tool Calls (logs + metrics)
+   ↓
+Context Aggregation
+   ↓
+LLM Final Reasoning (RCA)

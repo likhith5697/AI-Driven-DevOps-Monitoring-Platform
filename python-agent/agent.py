@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -10,8 +11,8 @@ from openai import OpenAI
 
 load_dotenv()
 
-logger = logging.getLogger("observai-agent")
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("observai-agent")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:5001")
@@ -22,294 +23,310 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-AVAILABLE_TOOLS = {
-    "get_recent_logs": {
-        "description": "Fetch recent logs across services.",
-        "default_args": {"size": 20}
-    },
-    "search_logs": {
-        "description": "Search logs by keyword, service, error, orderId, correlationId.",
-        "default_args": {"query": "error", "size": 20, "time_window_hours": 1}
-    },
-    "get_order_logs": {
-        "description": "Trace a specific orderId through logs.",
-        "default_args": {"order_id": None}
-    },
-    "get_correlation_logs": {
-        "description": "Trace a specific correlationId through logs.",
-        "default_args": {"correlation_id": None}
-    },
-    "get_service_health": {
-        "description": "Fetch high-level service health from Prometheus.",
-        "default_args": {}
-    },
-    "get_http_metrics": {
-        "description": "Fetch HTTP request metrics.",
-        "default_args": {"time_window_minutes": 60}
-    },
-    "get_metrics_summary": {
-        "description": "Fetch key metrics summary.",
-        "default_args": {}
-    }
-}
 
-PLANNER_PROMPT = """
-You are a production SRE AI planner.
+INTENT_PROMPT = """
+You are an SRE intent router.
 
-Create a short tool execution plan to answer the user's question.
+Classify the user's question into exactly one intent.
 
-Available tools:
-{tools}
+Allowed intents:
+- system_health
+- order_failure_rca
+- order_trace
+- metrics_question
+- log_search
+- unknown
+
+Extract entities if present:
+- order_id
+- correlation_id
+- service
+- time_window_minutes
 
 Rules:
-- Return ONLY valid JSON.
-- Do not include markdown.
-- Max 5 steps.
-- Prefer metrics first for health/failure questions.
-- Prefer logs first for debugging specific errors.
-- If question has orderId, use get_order_logs.
-- If question has correlationId, use get_correlation_logs.
-- If unsure, use get_service_health, get_http_metrics, and search_logs.
+- If question asks why orders are failing, choose order_failure_rca.
+- If question contains correlationId, choose order_trace.
+- If question contains orderId, choose order_trace.
+- If question asks request counts, success rate, failures count, choose metrics_question.
+- If question asks recent errors/logs, choose log_search.
+- If question asks health/status, choose system_health.
 
-JSON format:
-[
-  {{
-    "step": "short step name",
-    "tool": "tool_name",
-    "args": {{}},
-    "reason": "why this step is needed"
+Return ONLY valid JSON:
+{{
+  "intent": "...",
+  "entities": {{
+    "order_id": null,
+    "correlation_id": null,
+    "service": null,
+    "time_window_minutes": 60
   }}
-]
+}}
 
 User question:
 {question}
 """
 
 FINAL_PROMPT = """
-You are ObservAI, a production SRE agent.
-
-Use the collected tool results to answer the user's question.
+You are ObservAI, a production SRE AI.
 
 User question:
 {question}
 
-Execution plan:
-{plan}
+Intent:
+{intent}
 
-Tool results:
+Execution results:
 {context}
 
 Answer format:
 Status: HEALTHY | DEGRADED | CRITICAL | UNKNOWN
 
 Summary:
-1-2 sentences.
+Short clear summary.
 
 Evidence:
-- Use concrete numbers, services, orderId, correlationId, timestamps, errors.
+- concrete metrics/logs/timestamps/services
 
 Root Cause:
-- State the most likely cause.
-- If unknown, say exactly what is missing.
+- If root cause is known, state it.
+- If inventory failed before payment, say inventory root cause.
+- If payment failed after inventory, say payment root cause.
+- Do not blame payment if payment-service was not reached.
 
 Recommendation:
-- Give clear next actions.
-- Be concise and practical.
-
-Do not invent data. If logs or metrics are unavailable, say so.
+- practical next steps.
 """
 
-def call_llm(messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
-    response = client.chat.completions.create(
+def llm_text(messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
+    res = client.chat.completions.create(
         model=AGENT_MODEL,
         messages=messages,
-        temperature=temperature
+        temperature=temperature,
     )
-    return response.choices[0].message.content or ""
+    return res.choices[0].message.content or ""
 
-def safe_json_loads(text: str) -> Any:
+
+def safe_json(text: str) -> Dict[str, Any]:
     try:
         return json.loads(text)
     except Exception:
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1:
-            return json.loads(text[start:end + 1])
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end >= 0:
+            return json.loads(text[start : end + 1])
         raise
 
-def execute_mcp_tool(tool_name: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+
+def execute_mcp_tool(tool: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
     args = args or {}
 
     for attempt in range(3):
         try:
-            response = requests.post(
-                f"{MCP_SERVER_URL}/tools/{tool_name}",
+            r = requests.post(
+                f"{MCP_SERVER_URL}/tools/{tool}",
                 json=args,
-                timeout=20
+                timeout=30,
             )
 
-            if response.status_code == 200:
-                return response.json()
+            if r.status_code == 200:
+                return r.json()
 
             return {
                 "success": False,
-                "error": f"MCP tool returned HTTP {response.status_code}",
-                "body": response.text
+                "error": f"HTTP {r.status_code}",
+                "body": r.text,
             }
 
         except Exception as e:
             if attempt == 2:
-                return {
-                    "success": False,
-                    "error": str(e)
-                }
+                return {"success": False, "error": str(e)}
             time.sleep(1)
 
+    return {"success": False, "error": "unknown MCP failure"}
+
+
+def extract_entities_fallback(question: str) -> Dict[str, Any]:
+    correlation_match = re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        question,
+        re.IGNORECASE,
+    )
+
     return {
-        "success": False,
-        "error": "Unknown MCP tool failure"
+        "order_id": correlation_match.group(0) if "order" in question.lower() and correlation_match else None,
+        "correlation_id": correlation_match.group(0) if "correlation" in question.lower() and correlation_match else None,
+        "service": None,
+        "time_window_minutes": 60,
     }
 
-def create_plan(question: str) -> List[Dict[str, Any]]:
-    tools_text = json.dumps(AVAILABLE_TOOLS, indent=2)
 
-    prompt = PLANNER_PROMPT.format(
-        tools=tools_text,
-        question=question
-    )
-
-    raw_plan = call_llm(
-        [
-            {
-                "role": "system",
-                "content": "You are a strict JSON planner. Return only valid JSON."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
+def route_intent(question: str) -> Dict[str, Any]:
+    prompt = INTENT_PROMPT.format(question=question)
 
     try:
-        plan = safe_json_loads(raw_plan)
+        raw = llm_text(
+            [
+                {"role": "system", "content": "Return strict JSON only."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        routed = safe_json(raw)
     except Exception:
-        logger.warning("Planner failed JSON parse. Falling back to default plan.")
-        plan = [
-            {
-                "step": "Check service health",
-                "tool": "get_service_health",
-                "args": {},
-                "reason": "Default health check"
-            },
-            {
-                "step": "Check HTTP metrics",
-                "tool": "get_http_metrics",
-                "args": {"time_window_minutes": 60},
-                "reason": "Default metrics check"
-            },
-            {
-                "step": "Search recent errors",
-                "tool": "search_logs",
-                "args": {"query": "error OR failed OR timeout", "size": 20, "time_window_hours": 1},
-                "reason": "Default log check"
-            }
-        ]
+        q = question.lower()
+        entities = extract_entities_fallback(question)
 
-    clean_plan = []
+        if "why" in q and "order" in q and ("fail" in q or "failing" in q):
+            intent = "order_failure_rca"
+        elif "correlation" in q or "orderid" in q or "order id" in q:
+            intent = "order_trace"
+        elif "request" in q or "success rate" in q or "how many" in q:
+            intent = "metrics_question"
+        elif "log" in q or "error" in q:
+            intent = "log_search"
+        elif "health" in q or "status" in q:
+            intent = "system_health"
+        else:
+            intent = "unknown"
 
-    for step in plan[:5]:
-        tool = step.get("tool")
-        if tool not in AVAILABLE_TOOLS:
-            continue
+        routed = {
+            "intent": intent,
+            "entities": entities,
+        }
 
-        args = step.get("args") or {}
-        default_args = AVAILABLE_TOOLS[tool]["default_args"].copy()
-        default_args.update(args)
+    routed.setdefault("entities", {})
+    routed["entities"].setdefault("time_window_minutes", 60)
+    return routed
 
-        clean_plan.append({
-            "step": step.get("step", tool),
-            "tool": tool,
-            "args": default_args,
-            "reason": step.get("reason", "")
-        })
 
-    if not clean_plan:
-        clean_plan = [
-            {
-                "step": "Check service health",
-                "tool": "get_service_health",
-                "args": {},
-                "reason": "Fallback"
-            }
-        ]
+def run_intent_plan(intent: str, entities: Dict[str, Any], question: str) -> Dict[str, Any]:
+    steps = []
 
-    return clean_plan
-
-def execute_plan(plan: List[Dict[str, Any]]) -> Dict[str, Any]:
-    context = {
-        "steps": [],
-        "tool_outputs": {}
-    }
-
-    for step in plan:
-        tool = step["tool"]
-        args = step.get("args", {})
-
-        logger.info("Executing tool: %s args=%s", tool, args)
-
+    def run(step_name: str, tool: str, args: Dict[str, Any]):
         started = time.time()
         result = execute_mcp_tool(tool, args)
         latency_ms = round((time.time() - started) * 1000, 2)
 
-        step_result = {
-            "step": step["step"],
+        step = {
+            "step": step_name,
             "tool": tool,
             "args": args,
-            "reason": step.get("reason", ""),
             "latency_ms": latency_ms,
             "success": result.get("success", False),
-            "result": result.get("result", result)
+            "result": result.get("result", result),
+        }
+        steps.append(step)
+        return step
+
+    if intent == "system_health":
+        run("Check service health", "get_service_health", {})
+        run("Check business metrics", "get_business_metrics", {})
+        run("Check recent critical logs", "search_logs", {
+            "query": "error OR failed OR out of stock OR timeout",
+            "size": 20,
+            "time_window_hours": 1,
+        })
+
+    elif intent == "metrics_question":
+        run("Fetch HTTP request metrics", "get_http_metrics", {
+            "time_window_minutes": entities.get("time_window_minutes", 60)
+        })
+        run("Fetch business metrics", "get_business_metrics", {})
+
+    elif intent == "order_trace":
+        args = {
+            "order_id": entities.get("order_id"),
+            "correlation_id": entities.get("correlation_id"),
+            "time_window_hours": 24,
+        }
+        run("Build distributed request timeline", "get_flow_timeline", args)
+
+    elif intent == "order_failure_rca":
+        args = {
+            "order_id": entities.get("order_id"),
+            "correlation_id": entities.get("correlation_id"),
+            "time_window_hours": 24,
         }
 
-        context["steps"].append(step_result)
-        context["tool_outputs"][tool] = step_result
+        if entities.get("order_id") or entities.get("correlation_id"):
+            run("Run correlation/order RCA", "get_order_failure_rca", args)
+        else:
+            run("Check order HTTP failures", "get_http_metrics", {
+                "time_window_minutes": entities.get("time_window_minutes", 60)
+            })
+            run("Search order-service failures first", "search_logs", {
+                "service": "order-service",
+                "query": "Inventory not available OR Payment failed OR createOrder API error OR failed",
+                "size": 30,
+                "time_window_hours": 1,
+            })
+            run("Search inventory failures", "search_logs", {
+                "service": "inventory-service",
+                "query": "out of stock OR Stock reservation failed OR failed",
+                "size": 30,
+                "time_window_hours": 1,
+            })
+            run("Search payment failures", "search_logs", {
+                "service": "payment-service",
+                "query": "payment failed OR Payment processing failed OR failed",
+                "size": 30,
+                "time_window_hours": 1,
+            })
 
-    return context
+    elif intent == "log_search":
+        run("Search relevant logs", "search_logs", {
+            "query": "error OR failed OR out of stock OR timeout",
+            "service": entities.get("service"),
+            "size": 30,
+            "time_window_hours": 1,
+        })
 
-def generate_answer(question: str, plan: List[Dict[str, Any]], context: Dict[str, Any]) -> str:
+    else:
+        run("Fallback health check", "get_service_health", {})
+        run("Fallback logs", "search_logs", {
+            "query": "error OR failed OR out of stock",
+            "size": 20,
+            "time_window_hours": 1,
+        })
+
+    return {
+        "intent": intent,
+        "entities": entities,
+        "steps": steps,
+    }
+
+
+def generate_answer(question: str, routed: Dict[str, Any], context: Dict[str, Any]) -> str:
     prompt = FINAL_PROMPT.format(
         question=question,
-        plan=json.dumps(plan, indent=2),
-        context=json.dumps(context, indent=2, default=str)
+        intent=json.dumps(routed, indent=2),
+        context=json.dumps(context, indent=2, default=str),
     )
 
-    return call_llm(
+    return llm_text(
         [
-            {
-                "role": "system",
-                "content": "You are a concise production SRE assistant."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": "You are a precise production SRE assistant."},
+            {"role": "user", "content": prompt},
         ],
-        temperature=0.2
+        temperature=0.1,
     )
+
 
 def ask_agent(question: str) -> Dict[str, Any]:
     started = time.time()
 
-    plan = create_plan(question)
-    context = execute_plan(plan)
-    answer = generate_answer(question, plan, context)
+    routed = route_intent(question)
+    intent = routed.get("intent", "unknown")
+    entities = routed.get("entities", {})
 
-    latency_ms = round((time.time() - started) * 1000, 2)
+    logger.info("Intent routed: %s entities=%s", intent, entities)
+
+    context = run_intent_plan(intent, entities, question)
+    answer = generate_answer(question, routed, context)
 
     return {
         "answer": answer,
-        "plan": plan,
+        "intent": intent,
+        "entities": entities,
         "steps": context["steps"],
-        "latency_ms": latency_ms
+        "latency_ms": round((time.time() - started) * 1000, 2),
     }
