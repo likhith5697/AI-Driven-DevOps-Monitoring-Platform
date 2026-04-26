@@ -3,7 +3,7 @@ import re
 import json
 import time
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -23,6 +23,18 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ─────────────────────────────────────────────
+# UUID regex — used to validate entity extraction
+# ─────────────────────────────────────────────
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+# Max characters of tool output we'll pass to the final LLM prompt.
+# Prevents token blow-up when many log results are returned.
+MAX_CONTEXT_CHARS = 12_000
+
 
 INTENT_PROMPT = """
 You are an SRE intent router.
@@ -37,16 +49,19 @@ Allowed intents:
 - log_search
 - unknown
 
-Extract entities if present:
-- order_id
-- correlation_id
-- service
-- time_window_minutes
+Extract entities ONLY if they are explicitly present in the question:
+- order_id      → must look like a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). If absent, set null.
+- correlation_id → must look like a UUID. If absent, set null.
+- service       → only if a specific service name is mentioned (e.g. "order-service"). If absent, set null.
+- time_window_minutes → integer, default 60.
+
+IMPORTANT: Never invent or guess values for order_id or correlation_id.
+If no UUID is present in the question, both fields must be null.
 
 Rules:
 - If question asks why orders are failing, choose order_failure_rca.
-- If question contains correlationId, choose order_trace.
-- If question contains orderId, choose order_trace.
+- If question contains a UUID and "correlationId", choose order_trace.
+- If question contains a UUID and "orderId", choose order_trace.
 - If question asks request counts, success rate, failures count, choose metrics_question.
 - If question asks recent errors/logs, choose log_search.
 - If question asks health/status, choose system_health.
@@ -75,7 +90,7 @@ User question:
 Intent:
 {intent}
 
-Execution results:
+Execution results (truncated to fit context):
 {context}
 
 Answer format:
@@ -88,14 +103,15 @@ Evidence:
 - concrete metrics/logs/timestamps/services
 
 Root Cause:
-- If root cause is known, state it.
-- If inventory failed before payment, say inventory root cause.
-- If payment failed after inventory, say payment root cause.
+- If root cause is known, state it clearly.
+- If inventory failed before payment, say inventory is root cause.
+- If payment failed after inventory, say payment is root cause.
 - Do not blame payment if payment-service was not reached.
 
 Recommendation:
 - practical next steps.
 """
+
 
 def llm_text(messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
     res = client.chat.completions.create(
@@ -117,44 +133,41 @@ def safe_json(text: str) -> Dict[str, Any]:
         raise
 
 
-def execute_mcp_tool(tool: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    args = args or {}
+def is_valid_uuid(value: Any) -> bool:
+    """Return True only if value is a non-empty string matching UUID v4 format."""
+    return isinstance(value, str) and bool(UUID_RE.match(value.strip()))
 
-    for attempt in range(3):
-        try:
-            r = requests.post(
-                f"{MCP_SERVER_URL}/tools/{tool}",
-                json=args,
-                timeout=30,
+
+def sanitize_entities(entities: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Guard against LLM hallucinating non-UUID strings into id fields.
+
+    The LLM sometimes sets order_id = "last failed request" or
+    correlation_id = "some phrase" when no real UUID exists in the question.
+    This function resets those fields to None if they don't pass UUID validation.
+    """
+    for field in ("order_id", "correlation_id"):
+        raw = entities.get(field)
+        if raw is not None and not is_valid_uuid(raw):
+            logger.warning(
+                "Entity '%s' rejected (not a valid UUID): %r → None", field, raw
             )
-
-            if r.status_code == 200:
-                return r.json()
-
-            return {
-                "success": False,
-                "error": f"HTTP {r.status_code}",
-                "body": r.text,
-            }
-
-        except Exception as e:
-            if attempt == 2:
-                return {"success": False, "error": str(e)}
-            time.sleep(1)
-
-    return {"success": False, "error": "unknown MCP failure"}
+            entities[field] = None
+    return entities
 
 
 def extract_entities_fallback(question: str) -> Dict[str, Any]:
-    correlation_match = re.search(
+    """Regex-based fallback when LLM JSON parsing fails entirely."""
+    uuid_match = re.search(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         question,
         re.IGNORECASE,
     )
+    q = question.lower()
 
     return {
-        "order_id": correlation_match.group(0) if "order" in question.lower() and correlation_match else None,
-        "correlation_id": correlation_match.group(0) if "correlation" in question.lower() and correlation_match else None,
+        "order_id": uuid_match.group(0) if uuid_match and "order" in q else None,
+        "correlation_id": uuid_match.group(0) if uuid_match and "correlation" in q else None,
         "service": None,
         "time_window_minutes": 60,
     }
@@ -166,12 +179,13 @@ def route_intent(question: str) -> Dict[str, Any]:
     try:
         raw = llm_text(
             [
-                {"role": "system", "content": "Return strict JSON only."},
+                {"role": "system", "content": "Return strict JSON only. No markdown, no explanation."},
                 {"role": "user", "content": prompt},
             ]
         )
         routed = safe_json(raw)
     except Exception:
+        # Full LLM or parse failure — keyword fallback
         q = question.lower()
         entities = extract_entities_fallback(question)
 
@@ -188,14 +202,57 @@ def route_intent(question: str) -> Dict[str, Any]:
         else:
             intent = "unknown"
 
-        routed = {
-            "intent": intent,
-            "entities": entities,
-        }
+        routed = {"intent": intent, "entities": entities}
 
     routed.setdefault("entities", {})
     routed["entities"].setdefault("time_window_minutes", 60)
+
+    # ── KEY FIX: always sanitize entities after LLM extraction ──
+    routed["entities"] = sanitize_entities(routed["entities"])
+
     return routed
+
+
+def execute_mcp_tool(tool: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    args = args or {}
+
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                f"{MCP_SERVER_URL}/tools/{tool}",
+                json=args,
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return r.json()
+            return {"success": False, "error": f"HTTP {r.status_code}", "body": r.text}
+        except Exception as e:
+            if attempt == 2:
+                return {"success": False, "error": str(e)}
+            time.sleep(1)
+
+    return {"success": False, "error": "unknown MCP failure"}
+
+
+def truncate_context(context: Dict[str, Any]) -> str:
+    """
+    Serialize context to JSON and truncate to MAX_CONTEXT_CHARS.
+
+    Without this, a wide time window returning 90+ logs across 3 services
+    can exceed the model's context or send an enormous (costly) prompt.
+    When truncation happens, we append a notice so the LLM knows data is partial.
+    """
+    raw = json.dumps(context, indent=2, default=str)
+    if len(raw) <= MAX_CONTEXT_CHARS:
+        return raw
+
+    truncated = raw[:MAX_CONTEXT_CHARS]
+    logger.warning(
+        "Context truncated from %d to %d chars to fit prompt budget.",
+        len(raw),
+        MAX_CONTEXT_CHARS,
+    )
+    return truncated + "\n\n[... context truncated for token budget ...]"
 
 
 def run_intent_plan(intent: str, entities: Dict[str, Any], question: str) -> Dict[str, Any]:
@@ -253,7 +310,7 @@ def run_intent_plan(intent: str, entities: Dict[str, Any], question: str) -> Dic
             run("Check order HTTP failures", "get_http_metrics", {
                 "time_window_minutes": entities.get("time_window_minutes", 60)
             })
-            run("Search order-service failures first", "search_logs", {
+            run("Search order-service failures", "search_logs", {
                 "service": "order-service",
                 "query": "Inventory not available OR Payment failed OR createOrder API error OR failed",
                 "size": 30,
@@ -288,18 +345,14 @@ def run_intent_plan(intent: str, entities: Dict[str, Any], question: str) -> Dic
             "time_window_hours": 1,
         })
 
-    return {
-        "intent": intent,
-        "entities": entities,
-        "steps": steps,
-    }
+    return {"intent": intent, "entities": entities, "steps": steps}
 
 
 def generate_answer(question: str, routed: Dict[str, Any], context: Dict[str, Any]) -> str:
     prompt = FINAL_PROMPT.format(
         question=question,
         intent=json.dumps(routed, indent=2),
-        context=json.dumps(context, indent=2, default=str),
+        context=truncate_context(context),   # ← bounded, not raw dump
     )
 
     return llm_text(
@@ -318,7 +371,7 @@ def ask_agent(question: str) -> Dict[str, Any]:
     intent = routed.get("intent", "unknown")
     entities = routed.get("entities", {})
 
-    logger.info("Intent routed: %s entities=%s", intent, entities)
+    logger.info("Intent routed: %s | entities: %s", intent, entities)
 
     context = run_intent_plan(intent, entities, question)
     answer = generate_answer(question, routed, context)

@@ -1,7 +1,9 @@
+import logging
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+
 from agent import ask_agent
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("observai-api")
@@ -9,7 +11,7 @@ logger = logging.getLogger("observai-api")
 app = FastAPI(
     title="ObservAI GenAI SRE Agent",
     description="Advanced multi-step AI SRE agent for logs, metrics, and incident analysis.",
-    version="2.0.0"
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -20,36 +22,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def home():
     return {
         "service": "ObservAI Agent",
         "status": "running",
-        "version": "2.0.0"
+        "version": "2.0.0",
     }
+
 
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
-        "service": "ObservAI AI Agent"
+        "service": "ObservAI AI Agent",
     }
+
 
 @app.get("/ask")
 def ask(question: str = Query(..., min_length=3)):
     try:
         logger.info("User question received: %s", question)
-
         result = ask_agent(question)
-
         return result
-
-    except Exception as e:
+    except Exception:
         logger.exception("Agent error")
-        raise HTTPException(
-            status_code=500,
-            detail=f"AI agent failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="AI agent failed — check server logs.")
+
 
 @app.get("/health-report")
 def health_report():
@@ -59,14 +59,8 @@ def health_report():
             "Include service health, errors, failed requests, latency clues, "
             "order failures, payment issues, inventory issues, and recommendations."
         )
-
         result = ask_agent(question)
-
         return result
-
-    except Exception as e:
+    except Exception:
         logger.exception("Health report error")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Health report failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="Health report failed — check server logs.")
