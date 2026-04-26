@@ -3,7 +3,14 @@ global:
 
 scrape_configs:
 
-  - job_name: "node-service"
-
+  - job_name: "order-service"
     static_configs:
-      - targets: ["node-service:3000"]
+      - targets: ["order-service:3000"]
+
+  - job_name: "payment-service"
+    static_configs:
+      - targets: ["payment-service:3001"]
+
+  - job_name: "inventory-service"
+    static_configs:
+      - targets: ["inventory-service:3002"]

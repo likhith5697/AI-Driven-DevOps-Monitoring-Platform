@@ -1,18 +1,26 @@
-const express = require("express")
-const routes = require("./routes/routes")
-const { register } = require("./metrics/metrics")
+const express = require("express");
+const routes = require("./routes/routes");
+const { register } = require("./metrics/metrics");
+const logger = require("./logger/logger");
 
-const app = express()
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.use(express.json())
+app.use(express.json());
 
-app.use("/api", routes)
+app.get("/health", (req, res) => {
+  res.json({ status: "healthy", service: "order-service" });
+});
+
+app.use("/api", routes);
 
 app.get("/metrics", async (req, res) => {
-  res.set("Content-Type", register.contentType)
-  res.end(await register.metrics())
-})
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
 
-app.listen(3000, () => {
-  console.log("Order Service running on port 3000")
-})
+app.listen(PORT, () => {
+  logger.logInfo(`Order Service running on port ${PORT}`, {}, "system");
+});
+
+module.exports = app;

@@ -1,25 +1,28 @@
-const { v4: uuidv4 } = require("uuid")
-
-let orders = []
+const orders = [];
 
 function createOrder(order) {
-  const newOrder = {
-    id: uuidv4(),
+  const createdOrder = {
+    orderId: order.orderId,
     item: order.item,
     price: order.price,
-    createdAt: new Date()
-  }
+    paymentMethod: order.paymentMethod,
+    paymentId: order.paymentId,
+    reservationId: order.reservationId,
+    status: order.status || "pending",
+    correlationId: order.correlationId,
+    createdAt: new Date().toISOString()
+  };
 
-  orders.push(newOrder)
+  orders.push(createdOrder);
 
-  return newOrder
+  return createdOrder;
 }
 
 function getOrders() {
-  return orders
+  return orders;
 }
 
 module.exports = {
   createOrder,
   getOrders
-}
+};

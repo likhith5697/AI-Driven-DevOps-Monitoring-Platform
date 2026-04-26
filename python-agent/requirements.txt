@@ -5,7 +5,8 @@ opensearch-py
 schedule
 fastapi
 uvicorn
-
-# LangChain & Vector DB
-langchain
-chromadb
+requests
+pydantic
+# MCP (Model Context Protocol)
+mcp
+httpx

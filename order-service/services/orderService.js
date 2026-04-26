@@ -1,26 +1,39 @@
-const orderDao = require("../dao/orderDao")
-const logger = require("../logger/logger")
-const { orderCreated } = require("../metrics/metrics")
+const orderDao = require("../dao/orderDao");
+const logger = require("../logger/logger");
+const { orderCreated } = require("../metrics/metrics");
 
-function createOrder(order) {
-  logger.logInfo("Creating order in service layer", { item: order.item }) 
+function createOrder(order, correlationId) {
+  logger.logInfo(
+    "Creating order in service layer",
+    {
+      orderId: order.orderId,
+      item: order.item
+    },
+    correlationId
+  );
 
-  const created = orderDao.createOrder(order)
+  const created = orderDao.createOrder(order);
 
-  orderCreated.inc()
+  orderCreated.inc();
 
-  logger.logInfo("Order created in service layer", { orderId: created.id }) 
+  logger.logInfo(
+    "Order created in service layer",
+    {
+      orderId: created.orderId
+    },
+    correlationId
+  );
 
-  return created
+  return created;
 }
 
-function getOrders() {
-  logger.logInfo("Fetching all orders from service layer") 
+function getOrders(correlationId) {
+  logger.logInfo("Fetching all orders from service layer", {}, correlationId);
 
-  return orderDao.getOrders()
+  return orderDao.getOrders();
 }
 
 module.exports = {
   createOrder,
   getOrders
-}
+};

@@ -1,159 +1,315 @@
 import os
+import json
+import time
+import logging
+from typing import Any, Dict, List
+
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict
 
-from opensearch_client import search_logs
-from my_prometheus_client import query_prometheus
-
-from langchain.vectorstores import Chroma
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.docstore.document import Document
-
-# Load .env file
 load_dotenv()
 
-# Initialize OpenAI client
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("OPENAI_API_KEY not found in .env file!")
+logger = logging.getLogger("observai-agent")
+logging.basicConfig(level=logging.INFO)
 
-client = OpenAI(api_key=api_key)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:5001")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-4.1-nano")
 
-# Approximate cost per 1k tokens for GPT-4.1 nano
-COST_PER_1K_TOKENS = 1.0  # in cents
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY is missing")
 
-# =======================
-# Metrics Summarization
-# =======================
-def summarize_metrics(metrics, time_window_hours=1):
-    """Return structured summary for last X hours"""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=time_window_hours)
-    total = success = fail = 0
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-    for m in metrics:
-        ts = float(m.get("value", [0, 0])[0])
-        status = int(m.get("metric", {}).get("status", 0))
-        if ts >= start.timestamp():
-            total += 1
-            if status == 200:
-                success += 1
-            else:
-                fail += 1
-    return {"total": total, "success": success, "fail": fail}
+AVAILABLE_TOOLS = {
+    "get_recent_logs": {
+        "description": "Fetch recent logs across services.",
+        "default_args": {"size": 20}
+    },
+    "search_logs": {
+        "description": "Search logs by keyword, service, error, orderId, correlationId.",
+        "default_args": {"query": "error", "size": 20, "time_window_hours": 1}
+    },
+    "get_order_logs": {
+        "description": "Trace a specific orderId through logs.",
+        "default_args": {"order_id": None}
+    },
+    "get_correlation_logs": {
+        "description": "Trace a specific correlationId through logs.",
+        "default_args": {"correlation_id": None}
+    },
+    "get_service_health": {
+        "description": "Fetch high-level service health from Prometheus.",
+        "default_args": {}
+    },
+    "get_http_metrics": {
+        "description": "Fetch HTTP request metrics.",
+        "default_args": {"time_window_minutes": 60}
+    },
+    "get_metrics_summary": {
+        "description": "Fetch key metrics summary.",
+        "default_args": {}
+    }
+}
 
-# =======================
-# Log Processing
-# =======================
-def deduplicate_logs_by_order(logs):
-    grouped = defaultdict(list)
-    deduped = []
+PLANNER_PROMPT = """
+You are a production SRE AI planner.
 
-    for log in logs:
-        order_id = log.get("orderId") or log.get("body", {}).get("id")
-        if order_id:
-            grouped[order_id].append(log)
-        else:
-            if log.get("message") == "Received createOrder API call":
-                deduped.append(log)
+Create a short tool execution plan to answer the user's question.
 
-    for order_id, logs_list in grouped.items():
-        logs_list.sort(key=lambda x: x["timestamp"])
-        deduped.append(logs_list[0])
+Available tools:
+{tools}
 
-    deduped.sort(key=lambda x: x["timestamp"], reverse=True)
-    return deduped[:10]
+Rules:
+- Return ONLY valid JSON.
+- Do not include markdown.
+- Max 5 steps.
+- Prefer metrics first for health/failure questions.
+- Prefer logs first for debugging specific errors.
+- If question has orderId, use get_order_logs.
+- If question has correlationId, use get_correlation_logs.
+- If unsure, use get_service_health, get_http_metrics, and search_logs.
 
-def summarize_logs(logs, keyword=None, time_window_hours=1):
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=time_window_hours)
-    filtered = []
+JSON format:
+[
+  {{
+    "step": "short step name",
+    "tool": "tool_name",
+    "args": {{}},
+    "reason": "why this step is needed"
+  }}
+]
 
-    for log in logs:
-        ts = datetime.fromisoformat(log["timestamp"])
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if ts >= start and (keyword is None or keyword.lower() in log["message"].lower()):
-            filtered.append(log)
-
-    return deduplicate_logs_by_order(filtered)
-
-# =======================
-# RAG Setup with Chroma
-# =======================
-embedding_model = "text-embedding-3-small"
-embeddings = OpenAIEmbeddings(model=embedding_model)
-persist_dir = "vector_store"
-
-# Load or initialize vector store
-if os.path.exists(persist_dir):
-    vector_store = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
-else:
-    vector_store = Chroma(embedding_function=embeddings, persist_directory=persist_dir)
-    historical_logs = search_logs(size=1000)
-    for log in historical_logs:
-        text = f"{log['timestamp']} - {log.get('message')} - {log.get('body', '')}"
-        vector_store.add_documents([Document(page_content=text, metadata=log)])
-    vector_store.persist()
-
-def retrieve_logs_with_rag(question, k=5):
-    docs = vector_store.similarity_search(question, k=k)
-    return [doc.page_content for doc in docs]
-
-# =======================
-# Prompt Construction
-# =======================
-def create_prompt(question):
-    rag_logs = retrieve_logs_with_rag(question, k=5)
-    live_logs = summarize_logs(search_logs(size=10))
-    metrics = query_prometheus("http_requests_total")
-    metrics_summary = summarize_metrics(metrics)
-
-    prompt = f"""
-You are an observability AI assistant for a Node.js microservice.
-
-Historical logs: {rag_logs}
-Recent logs: {live_logs}
-Metrics Summary: {metrics_summary}
-
-Question: {question}
-
-Explain clearly.
+User question:
+{question}
 """
-    return prompt
 
-# =======================
-# Cost Estimation
-# =======================
-def estimate_cost(prompt, answer):
-    tokens = (len(prompt) + len(answer)) / 4  # rough 1 token ≈ 4 chars
-    cost = (tokens / 1000) * COST_PER_1K_TOKENS
-    return cost
+FINAL_PROMPT = """
+You are ObservAI, a production SRE agent.
 
-# =======================
-# Ask Agent
-# =======================
-def ask_agent(question):
-    prompt = create_prompt(question)
+Use the collected tool results to answer the user's question.
+
+User question:
+{question}
+
+Execution plan:
+{plan}
+
+Tool results:
+{context}
+
+Answer format:
+Status: HEALTHY | DEGRADED | CRITICAL | UNKNOWN
+
+Summary:
+1-2 sentences.
+
+Evidence:
+- Use concrete numbers, services, orderId, correlationId, timestamps, errors.
+
+Root Cause:
+- State the most likely cause.
+- If unknown, say exactly what is missing.
+
+Recommendation:
+- Give clear next actions.
+- Be concise and practical.
+
+Do not invent data. If logs or metrics are unavailable, say so.
+"""
+
+def call_llm(messages: List[Dict[str, str]], temperature: float = 0.1) -> str:
     response = client.chat.completions.create(
-        model="gpt-4.1-nano",
-        messages=[{"role": "user", "content": prompt}]
+        model=AGENT_MODEL,
+        messages=messages,
+        temperature=temperature
     )
-    answer = response.choices[0].message.content
-    cost = estimate_cost(prompt, answer)
-    print(f"[Approximate cost for this request: ${cost:.4f}]")
-    return answer
+    return response.choices[0].message.content or ""
 
-# =======================
-# CLI Run
-# =======================
-if __name__ == "__main__":
-    print("Observability AI Agent (GPT-4.1 nano + Chroma RAG)")
-    while True:
-        question = input("\nAsk Agent: ")
-        if question.lower() in ("exit", "quit"):
-            break
-        answer = ask_agent(question)
-        print("\nAgent:", answer)
+def safe_json_loads(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1:
+            return json.loads(text[start:end + 1])
+        raise
+
+def execute_mcp_tool(tool_name: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    args = args or {}
+
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                f"{MCP_SERVER_URL}/tools/{tool_name}",
+                json=args,
+                timeout=20
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            return {
+                "success": False,
+                "error": f"MCP tool returned HTTP {response.status_code}",
+                "body": response.text
+            }
+
+        except Exception as e:
+            if attempt == 2:
+                return {
+                    "success": False,
+                    "error": str(e)
+                }
+            time.sleep(1)
+
+    return {
+        "success": False,
+        "error": "Unknown MCP tool failure"
+    }
+
+def create_plan(question: str) -> List[Dict[str, Any]]:
+    tools_text = json.dumps(AVAILABLE_TOOLS, indent=2)
+
+    prompt = PLANNER_PROMPT.format(
+        tools=tools_text,
+        question=question
+    )
+
+    raw_plan = call_llm(
+        [
+            {
+                "role": "system",
+                "content": "You are a strict JSON planner. Return only valid JSON."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    try:
+        plan = safe_json_loads(raw_plan)
+    except Exception:
+        logger.warning("Planner failed JSON parse. Falling back to default plan.")
+        plan = [
+            {
+                "step": "Check service health",
+                "tool": "get_service_health",
+                "args": {},
+                "reason": "Default health check"
+            },
+            {
+                "step": "Check HTTP metrics",
+                "tool": "get_http_metrics",
+                "args": {"time_window_minutes": 60},
+                "reason": "Default metrics check"
+            },
+            {
+                "step": "Search recent errors",
+                "tool": "search_logs",
+                "args": {"query": "error OR failed OR timeout", "size": 20, "time_window_hours": 1},
+                "reason": "Default log check"
+            }
+        ]
+
+    clean_plan = []
+
+    for step in plan[:5]:
+        tool = step.get("tool")
+        if tool not in AVAILABLE_TOOLS:
+            continue
+
+        args = step.get("args") or {}
+        default_args = AVAILABLE_TOOLS[tool]["default_args"].copy()
+        default_args.update(args)
+
+        clean_plan.append({
+            "step": step.get("step", tool),
+            "tool": tool,
+            "args": default_args,
+            "reason": step.get("reason", "")
+        })
+
+    if not clean_plan:
+        clean_plan = [
+            {
+                "step": "Check service health",
+                "tool": "get_service_health",
+                "args": {},
+                "reason": "Fallback"
+            }
+        ]
+
+    return clean_plan
+
+def execute_plan(plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+    context = {
+        "steps": [],
+        "tool_outputs": {}
+    }
+
+    for step in plan:
+        tool = step["tool"]
+        args = step.get("args", {})
+
+        logger.info("Executing tool: %s args=%s", tool, args)
+
+        started = time.time()
+        result = execute_mcp_tool(tool, args)
+        latency_ms = round((time.time() - started) * 1000, 2)
+
+        step_result = {
+            "step": step["step"],
+            "tool": tool,
+            "args": args,
+            "reason": step.get("reason", ""),
+            "latency_ms": latency_ms,
+            "success": result.get("success", False),
+            "result": result.get("result", result)
+        }
+
+        context["steps"].append(step_result)
+        context["tool_outputs"][tool] = step_result
+
+    return context
+
+def generate_answer(question: str, plan: List[Dict[str, Any]], context: Dict[str, Any]) -> str:
+    prompt = FINAL_PROMPT.format(
+        question=question,
+        plan=json.dumps(plan, indent=2),
+        context=json.dumps(context, indent=2, default=str)
+    )
+
+    return call_llm(
+        [
+            {
+                "role": "system",
+                "content": "You are a concise production SRE assistant."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2
+    )
+
+def ask_agent(question: str) -> Dict[str, Any]:
+    started = time.time()
+
+    plan = create_plan(question)
+    context = execute_plan(plan)
+    answer = generate_answer(question, plan, context)
+
+    latency_ms = round((time.time() - started) * 1000, 2)
+
+    return {
+        "answer": answer,
+        "plan": plan,
+        "steps": context["steps"],
+        "latency_ms": latency_ms
+    }

@@ -1,12 +1,37 @@
+  mcp-server:
+    build:
+      context: ./python-agent
+      dockerfile: Dockerfile.mcp
+    container_name: observai-mcp-server
+    ports:
+      - "5001:5001"
+    environment:
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=C0mpl3x$Admin!2026Secure
+      - OPENSEARCH_INDEX_PATTERN=*service-logs-*
+      - PROMETHEUS_URL=http://prometheus:9090
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    networks:
+      - observai-network
 
-services:
-  rag-agent:
-    build: .
-    container_name: rag-agent
+  health-agent:
+    build:
+      context: ./python-agent
+      dockerfile: Dockerfile
+    container_name: observai-health-agent
     ports:
       - "5000:5000"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-    volumes:
-      - ./vector_store:/app/vector_store  # persist Chroma vector store
-      - ./logs:/app/logs                  # optional: persist logs
+      - MCP_SERVER_URL=http://mcp-server:5001
+      - AGENT_MODEL=gpt-4.1-nano
+    depends_on:
+      - mcp-server
+    networks:
+      - observai-network

@@ -1,11 +1,8 @@
 const winston = require("winston");
 const { Client } = require("@opensearch-project/opensearch");
 
-const OPENSEARCH_URL =
-  process.env.OPENSEARCH_URL || "http://opensearch:9200";
-
 const client = new Client({
-  node: OPENSEARCH_URL
+  node: process.env.OPENSEARCH_URL || "http://opensearch:9200"
 });
 
 const logger = winston.createLogger({
@@ -15,58 +12,61 @@ const logger = winston.createLogger({
 });
 
 async function sendLog(log, retries = 3) {
-  const index = `order-service-logs-${new Date()
+  const index = `inventory-service-logs-${new Date()
     .toISOString()
     .split("T")[0]}`;
 
   for (let i = 0; i < retries; i++) {
     try {
-      await client.index({
-        index,
-        body: log
-      });
+      await client.index({ index, body: log });
       return;
     } catch (err) {
       if (i === retries - 1) {
-        console.error("OpenSearch log error", err.message);
+        console.error("OpenSearch log error", err);
       } else {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise(res => setTimeout(res, 1000));
       }
     }
   }
 }
 
-function buildLog(level, message, data = {}, correlationId = null) {
-  return {
-    level,
-    service: "order-service",
+function logInfo(message, data = {}, correlationId = null) {
+  const log = {
+    level: "info",
+    service: "inventory-service",
     message,
     correlationId,
     timestamp: new Date().toISOString(),
     ...data
   };
-}
-
-function logInfo(message, data = {}, correlationId = null) {
-  const log = buildLog("info", message, data, correlationId);
   logger.info(log);
   sendLog(log);
 }
 
 function logError(message, data = {}, correlationId = null) {
-  const log = buildLog("error", message, data, correlationId);
+  const log = {
+    level: "error",
+    service: "inventory-service",
+    message,
+    correlationId,
+    timestamp: new Date().toISOString(),
+    ...data
+  };
   logger.error(log);
   sendLog(log);
 }
 
 function logWarn(message, data = {}, correlationId = null) {
-  const log = buildLog("warn", message, data, correlationId);
+  const log = {
+    level: "warn",
+    service: "inventory-service",
+    message,
+    correlationId,
+    timestamp: new Date().toISOString(),
+    ...data
+  };
   logger.warn(log);
   sendLog(log);
 }
 
-module.exports = {
-  logInfo,
-  logError,
-  logWarn
-};
+module.exports = { logInfo, logError, logWarn };
